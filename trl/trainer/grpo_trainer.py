@@ -349,10 +349,18 @@ class GRPOTrainer(Trainer):
                     return_value=None
                 )
 
-                # Only set multiprocessing method and CUDA_VISIBLE_DEVICES for tensor parallelism
-                if tensor_parallel_size > 1:
+                # Replace the existing multiprocess method handling with:
+                if torch.cuda.is_initialized():
+                    # Required when CUDA is pre-initialized (common in multi-GPU training)
                     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-                    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+                    warnings.warn(
+                        "CUDA was previously initialized. Using 'spawn' multiprocessing method for vLLM workers. "
+                        "See https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#python-multiprocessing",
+                        UserWarning
+                    )
+                else:
+                    # Only use fork if CUDA not initialized yet
+                    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
 
                 with world_size_patch, rank_patch, profiling_patch:
                     self.llm = LLM(
