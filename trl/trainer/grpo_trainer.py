@@ -363,32 +363,50 @@ class GRPOTrainer(Trainer):
                     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "fork"
 
                 with world_size_patch, rank_patch, profiling_patch:
-                    print("Initializing vLLM engine...")
-                    self.llm = LLM(
-                        model=model.name_or_path,
-                        device=vllm_device,
-                        tensor_parallel_size=tensor_parallel_size,
-                        gpu_memory_utilization=self.args.vllm_gpu_memory_utilization,
-                        dtype=self.args.vllm_dtype,
-                        # Automatic Prefix Caching caches the KV cache of existing queries, so that a new query can
-                        # directly reuse the KV cache if it shares the same prefix with one of the existing queries.
-                        # This is particularly useful here because we generate completions from the same prompts.
-                        enable_prefix_caching=True,
-                        max_model_len=self.args.vllm_max_model_len,
-                        disable_custom_all_reduce=tensor_parallel_size > 1,  # Only needed for multi-GPU
-                    )
-                    print("vLLM engine initialized successfully")
-                    self.sampling_params = SamplingParams(
-                        n=self.num_generations,
-                        temperature=args.temperature,
-                        max_tokens=self.max_completion_length,
-                    )
-                    print("Sampling parameters configured")
+                    import time
+                    # Add detailed debug logging around vLLM initialization
+                    if self.accelerator.is_main_process:
+                        print(f"[{time.strftime('%H:%M:%S')}] Starting vLLM initialization...")
+                        print(f"[{time.strftime('%H:%M:%S')}] Creating LLM instance with:")
+                        print(f"  - tensor_parallel_size: {tensor_parallel_size}")
+                        print(f"  - device: {vllm_device}")
+                        print(f"  - disable_custom_all_reduce: {tensor_parallel_size > 1}")
+                        
+                        try:
+                            self.llm = LLM(
+                                model=model.name_or_path,
+                                device=vllm_device,
+                                tensor_parallel_size=tensor_parallel_size,
+                                gpu_memory_utilization=self.args.vllm_gpu_memory_utilization,
+                                dtype=self.args.vllm_dtype,
+                                enable_prefix_caching=True,
+                                max_model_len=self.args.vllm_max_model_len,
+                                disable_custom_all_reduce=tensor_parallel_size > 1,  # Only needed for multi-GPU
+                            )
+                            print(f"[{time.strftime('%H:%M:%S')}] vLLM engine initialized successfully")
+                            
+                            self.sampling_params = SamplingParams(
+                                n=self.num_generations,
+                                temperature=args.temperature,
+                                max_tokens=self.max_completion_length,
+                            )
+                            print(f"[{time.strftime('%H:%M:%S')}] Sampling parameters configured")
+                        except Exception as e:
+                            print(f"[{time.strftime('%H:%M:%S')}] Error during vLLM initialization: {str(e)}")
+                            raise
 
-            self._last_loaded_step = 0
-            print("Waiting for all processes to sync...")
-            self.accelerator.wait_for_everyone()
-            print("All processes synced")
+                self._last_loaded_step = 0
+                print(f"[{time.strftime('%H:%M:%S')}] Waiting for all processes to sync...")
+                self.accelerator.wait_for_everyone()
+                print(f"[{time.strftime('%H:%M:%S')}] All processes synced")
+            else:
+                self.generation_config = GenerationConfig(
+                    max_new_tokens=self.max_completion_length,
+                    do_sample=True,
+                    temperature=args.temperature,
+                    num_return_sequences=self.num_generations,
+                    pad_token_id=processing_class.pad_token_id,
+                )
         else:
             self.generation_config = GenerationConfig(
                 max_new_tokens=self.max_completion_length,
