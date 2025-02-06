@@ -317,19 +317,26 @@ class GRPOTrainer(Trainer):
                         "This may lead to performance issues or OOM errors. Recommended to use dedicated GPUs for vLLM."
                     )
 
-                # Configure vLLM parameters
+                # Configure distributed environment patching
                 tensor_parallel_size = len(gpu_ids) if gpu_ids else 1
-                vllm_device = "cuda" if len(gpu_ids) > 1 else vllm_device
 
-                # vLLM is not compatible with accelerate. So we need to patch it to make sure we can (1) place the vLLM
-                # model on the desired device (world_size_patch) and (2) avoid a test that is not designed for our
-                # setting (profiling_patch).
-                world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
+                # Create dynamic patches based on tensor parallelism
+                world_size_patch = patch(
+                    "torch.distributed.get_world_size",
+                    return_value=tensor_parallel_size if tensor_parallel_size > 1 else 1
+                )
+
+                rank_patch = patch(
+                    "torch.distributed.get_rank",
+                    return_value=0  # Always act as rank 0 since we're single-process
+                )
+
                 profiling_patch = patch(
                     "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
                     return_value=None
                 )
-                with world_size_patch, profiling_patch:
+
+                with world_size_patch, rank_patch, profiling_patch:
                     self.llm = LLM(
                         model=model.name_or_path,
                         device=vllm_device,
