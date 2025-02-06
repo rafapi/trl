@@ -290,15 +290,22 @@ class GRPOTrainer(Trainer):
             if self.accelerator.is_main_process:
                 vllm_device = self.args.vllm_device
                 if vllm_device == "auto":
-                    vllm_device = f"cuda:{self.accelerator.num_processes}"
+                    # When auto, use GPUs right after the training ones
+                    training_gpu_count = self.accelerator.num_processes
+                    vllm_device = f"cuda:{training_gpu_count}"
 
-                # Parse GPU IDs regardless of configuration
+                # Parse GPU IDs
                 gpu_ids = []
                 if "cuda:" in vllm_device:
                     try:
-                        gpu_ids = [int(idx) for idx in vllm_device.split(":")[1].split(",")]
+                        # Handle both single GPU ("cuda:0") and multi-GPU ("cuda:0,1,2") formats
+                        gpu_part = vllm_device.split(":")[1]
+                        if "," in gpu_part:
+                            gpu_ids = [int(idx) for idx in gpu_part.split(",")]
+                        else:
+                            gpu_ids = [int(gpu_part)]
                     except ValueError:
-                        raise ValueError(f"Invalid vLLM device format: {vllm_device}. Use 'cuda:x,y,z' or 'auto'")
+                        raise ValueError(f"Invalid vLLM device format: {vllm_device}. Use 'cuda:x' or 'cuda:x,y,z' or 'auto'")
 
                 # Verify GPU availability
                 available_gpus = list(range(torch.cuda.device_count()))
@@ -317,10 +324,16 @@ class GRPOTrainer(Trainer):
                         "This may lead to performance issues or OOM errors. Recommended to use dedicated GPUs for vLLM."
                     )
 
-                # Configure distributed environment patching
-                tensor_parallel_size = len(gpu_ids) if gpu_ids else 1
+                # For vLLM initialization, we need to use the format "cuda:x" for single GPU
+                # or just "cuda" for multiple GPUs (tensor parallelism)
+                tensor_parallel_size = len(gpu_ids)
+                if tensor_parallel_size > 1:
+                    vllm_device = "cuda"
+                    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+                else:
+                    vllm_device = f"cuda:{gpu_ids[0]}"
 
-                # Create dynamic patches based on tensor parallelism
+                # Configure distributed environment patching
                 world_size_patch = patch(
                     "torch.distributed.get_world_size",
                     return_value=tensor_parallel_size if tensor_parallel_size > 1 else 1
