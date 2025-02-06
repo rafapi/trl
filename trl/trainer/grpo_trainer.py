@@ -349,6 +349,11 @@ class GRPOTrainer(Trainer):
                     return_value=None
                 )
 
+                # Only set multiprocessing method and CUDA_VISIBLE_DEVICES for tensor parallelism
+                if tensor_parallel_size > 1:
+                    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+                    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, gpu_ids))
+
                 with world_size_patch, rank_patch, profiling_patch:
                     self.llm = LLM(
                         model=model.name_or_path,
@@ -361,6 +366,7 @@ class GRPOTrainer(Trainer):
                         # This is particularly useful here because we generate completions from the same prompts.
                         enable_prefix_caching=True,
                         max_model_len=self.args.vllm_max_model_len,
+                        disable_custom_all_reduce=tensor_parallel_size > 1,  # Only needed for multi-GPU
                     )
                 self.sampling_params = SamplingParams(
                     n=self.num_generations,
