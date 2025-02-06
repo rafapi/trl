@@ -336,12 +336,12 @@ class GRPOTrainer(Trainer):
                 # Configure distributed environment patching
                 world_size_patch = patch(
                     "torch.distributed.get_world_size",
-                    return_value=tensor_parallel_size if tensor_parallel_size > 1 else 1
+                    return_value=tensor_parallel_size  # Directly use TP size
                 )
 
                 rank_patch = patch(
                     "torch.distributed.get_rank",
-                    return_value=0  # Always act as rank 0 since we're single-process
+                    return_value=self.accelerator.process_index % tensor_parallel_size
                 )
 
                 profiling_patch = patch(
