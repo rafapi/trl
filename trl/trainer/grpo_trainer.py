@@ -290,50 +290,44 @@ class GRPOTrainer(Trainer):
             if self.accelerator.is_main_process:
                 vllm_device = self.args.vllm_device
                 if vllm_device == "auto":
-                    # Default to next available GPU after training processes
                     vllm_device = f"cuda:{self.accelerator.num_processes}"
 
-                # Parse multiple GPUs if specified
+                # Parse GPU IDs regardless of configuration
+                gpu_ids = []
                 if "cuda:" in vllm_device:
                     try:
                         gpu_ids = [int(idx) for idx in vllm_device.split(":")[1].split(",")]
                     except ValueError:
                         raise ValueError(f"Invalid vLLM device format: {vllm_device}. Use 'cuda:x,y,z' or 'auto'")
 
-                    # Verify GPU availability
-                    available_gpus = list(range(torch.cuda.device_count()))
-                    unavailable_gpus = [idx for idx in gpu_ids if idx not in available_gpus]
-                    if unavailable_gpus:
-                        raise ValueError(
-                            f"Requested GPUs {unavailable_gpus} not available. "
-                            f"Available GPUs: {available_gpus}"
-                        )
-
-                    tensor_parallel_size = len(gpu_ids)
-                    vllm_device = "cuda"
-                else:
-                    tensor_parallel_size = 1
-
-                # Check that the requested device is available
-                if vllm_device.split(":")[0] == "cuda" and int(vllm_device.split(":")[1]) >= torch.cuda.device_count():
+                # Verify GPU availability
+                available_gpus = list(range(torch.cuda.device_count()))
+                unavailable_gpus = [idx for idx in gpu_ids if idx not in available_gpus]
+                if unavailable_gpus:
                     raise ValueError(
-                        f"The requested device for vllm ({vllm_device}) is not available. You are likely using vLLM "
-                        "without restricting the number of GPUs for training. Set the `--num_processes` argument to a "
-                        "value lower than the number of GPUs available on your machine—typically, reducing it by one "
-                        f"is sufficient. In your case: `--num_processes {torch.cuda.device_count() - 1}`."
+                        f"Requested GPUs {unavailable_gpus} not available. Available GPUs: {available_gpus}"
                     )
-                # Check that the requested device is not also used for training
-                if vllm_device in {f"cuda:{idx}" for idx in range(self.accelerator.num_processes)}:
+
+                # Check for device conflicts with training processes
+                training_gpus = set(range(self.accelerator.num_processes))
+                conflicting_gpus = [idx for idx in gpu_ids if idx in training_gpus]
+                if conflicting_gpus:
                     warnings.warn(
-                        f"The requested device {vllm_device} is also used for training. This may lead to unexpected "
-                        "behavior. It is recommended to use a dedicated device for vLLM."
+                        f"Requested vLLM GPUs {conflicting_gpus} are also used for training (GPUs {list(training_gpus)}). "
+                        "This may lead to performance issues or OOM errors. Recommended to use dedicated GPUs for vLLM."
                     )
+
+                # Configure vLLM parameters
+                tensor_parallel_size = len(gpu_ids) if gpu_ids else 1
+                vllm_device = "cuda" if len(gpu_ids) > 1 else vllm_device
+
                 # vLLM is not compatible with accelerate. So we need to patch it to make sure we can (1) place the vLLM
                 # model on the desired device (world_size_patch) and (2) avoid a test that is not designed for our
                 # setting (profiling_patch).
                 world_size_patch = patch("torch.distributed.get_world_size", return_value=1)
                 profiling_patch = patch(
-                    "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling", return_value=None
+                    "vllm.worker.worker.Worker._assert_memory_footprint_increased_during_profiling",
+                    return_value=None
                 )
                 with world_size_patch, profiling_patch:
                     self.llm = LLM(
